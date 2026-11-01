@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+.scannerwork/
+reports/
+.env
+.env.*
+*.log

@@ -1,0 +1,222 @@
+name: Build → Sonar → Trivy → Push → Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devsecops-main
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: 1 · Build
+    if: >-
+      github.repository == 'Arthu085/logistics-landing-page' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      repository: ${{ steps.image.outputs.repository }}
+      image_id: ${{ steps.image.outputs.image_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm run build
+        env:
+          BUILD_REVISION: ${{ github.sha }}
+      - name: Build and preserve the image
+        id: image
+        env:
+          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+        run: |
+          if [[ ! "$DOCKERHUB_IMAGE" =~ ^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]]; then
+            echo '::error::Set DOCKERHUB_IMAGE to username/logistics-landing-page in repository Actions variables.'
+            exit 1
+          fi
+          repository="docker.io/$DOCKERHUB_IMAGE"
+          image="$repository:sha-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker build --platform linux/amd64 --build-arg "BUILD_REVISION=$GITHUB_SHA" --tag "$image" .
+          mkdir -p image-artifact
+          docker save --output image-artifact/image.tar "$image"
+          (cd image-artifact && sha256sum image.tar > image.tar.sha256)
+          image_id=$(docker image inspect "$image" --format '{{.Id}}')
+          printf '%s\n' "$image" > image-artifact/image.ref
+          printf '%s\n' "$image_id" > image-artifact/image.id
+          printf 'image=%s\nrepository=%s\nimage_id=%s\n' "$image" "$repository" "$image_id" >> "$GITHUB_OUTPUT"
+          printf '### Build\nImage: `%s`\n\nImage ID: `%s`\n' "$image" "$image_id" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: docker-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: image-artifact/
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+
+  sonar:
+    name: 2 · Sonar
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate Sonar configuration
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+          SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
+        run: |
+          for key in SONAR_TOKEN SONAR_PROJECT_KEY SONAR_ORGANIZATION; do
+            if [[ -z "${!key}" ]]; then
+              echo "::error::Missing Sonar configuration: $key"
+              exit 1
+            fi
+          done
+          [[ "$SONAR_PROJECT_KEY" =~ ^[a-zA-Z0-9_.:-]+$ ]]
+          [[ "$SONAR_ORGANIZATION" =~ ^[a-zA-Z0-9_-]+$ ]]
+          printf '### Sonar\n[Quality report](https://sonarcloud.io/dashboard?id=%s)\n' "$SONAR_PROJECT_KEY" >> "$GITHUB_STEP_SUMMARY"
+      - name: Scan and wait for Quality Gate
+        uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
+        with:
+          args: >-
+            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
+      - name: Preserve analysis metadata
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sonar-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .scannerwork/report-task.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+  trivy:
+    name: 3 · Trivy
+    needs: [build, sonar]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: docker-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: image-artifact
+      - name: Validate image archive
+        working-directory: image-artifact
+        run: sha256sum --check image.tar.sha256
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567
+        with:
+          version: v0.76.1
+          cache: false
+      - name: Scan image and repository
+        run: |
+          mkdir -p reports
+          image_status=0
+          source_status=0
+          trivy image --input image-artifact/image.tar --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --format json --output reports/trivy-image.json || image_status=$?
+          trivy fs --scanners vuln,secret --severity HIGH,CRITICAL --exit-code 1 --skip-dirs image-artifact --skip-dirs .git --format json --output reports/trivy-source.json . || source_status=$?
+          printf 'Image scan exit status: %s\nSource scan exit status: %s\n' "$image_status" "$source_status" | tee reports/status.txt
+          printf '### Trivy\nHIGH and CRITICAL findings block publication, including unfixed vulnerabilities.\n\nImage status: `%s` · Source status: `%s`\n\nSee the Trivy reports artifact.\n' "$image_status" "$source_status" >> "$GITHUB_STEP_SUMMARY"
+          [[ "$image_status" == 0 && "$source_status" == 0 ]]
+      - name: Preserve security reports even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: trivy-reports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+  push:
+    name: 4 · Push
+    needs: [build, trivy]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      image_ref: ${{ steps.publish.outputs.image_ref }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: docker-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: image-artifact
+      - name: Load the approved image
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+          IMAGE_ID: ${{ needs.build.outputs.image_id }}
+        run: |
+          (cd image-artifact && sha256sum --check image.tar.sha256)
+          docker load --input image-artifact/image.tar
+          [[ "$(docker image inspect "$IMAGE" --format '{{.Id}}')" == "$IMAGE_ID" ]]
+      - name: Authenticate to Docker Hub
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          [[ -n "$DOCKERHUB_USERNAME" && -n "$DOCKERHUB_TOKEN" ]]
+          printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+      - name: Publish and verify the exact image
+        id: publish
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+          IMAGE_ID: ${{ needs.build.outputs.image_id }}
+          IMAGE_REPOSITORY: ${{ needs.build.outputs.repository }}
+        run: |
+          docker push "$IMAGE" | tee push.log
+          digest=$(sed -nE 's/.*digest: (sha256:[a-f0-9]{64}).*/\1/p' push.log | tail -n 1)
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          image_ref="$IMAGE_REPOSITORY@$digest"
+          docker pull "$image_ref"
+          [[ "$(docker image inspect "$image_ref" --format '{{.Id}}')" == "$IMAGE_ID" ]]
+          printf 'image_ref=%s\n' "$image_ref" >> "$GITHUB_OUTPUT"
+          printf '### Published image\n`%s`\n\nTag: `%s`\n' "$image_ref" "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+      - name: Log out
+        if: always()
+        run: docker logout
+
+  deploy:
+    name: 5 · Deploy
+    needs: push
+    if: >-
+      github.repository == 'Arthu085/logistics-landing-page' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, Linux, X64, kind-logistics]
+    environment: kind-local
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Deploy the published digest and verify HTTP
+        env:
+          IMAGE_REF: ${{ needs.push.outputs.image_ref }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: bash scripts/deploy.sh "$IMAGE_REF"
+      - name: Report deployment
+        if: always()
+        env:
+          IMAGE_REF: ${{ needs.push.outputs.image_ref }}
+          DEPLOY_STATUS: ${{ job.status }}
+        run: |
+          printf '### Deploy: %s\nImage: `%s`\n\nContext: `kind-logistics` · Namespace: `logistics`\n\nLocal access: http://localhost:8080\n' "$DEPLOY_STATUS" "$IMAGE_REF" >> "$GITHUB_STEP_SUMMARY"
