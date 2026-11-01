@@ -210,7 +210,9 @@ A pipeline principal roda em push na `main` ou por execução manual da própria
 | 2 · Sonar | GitHub-hosted | Análise e Quality Gate aprovados |
 | 3 · Trivy | GitHub-hosted | Nenhuma vulnerabilidade HIGH/CRITICAL na imagem ou dependências, nem secret HIGH/CRITICAL no repositório |
 | 4 · Push | GitHub-hosted | Publica o mesmo tar aprovado; baixa a imagem por digest e confere seu image ID |
-| 5 · Deploy | Self-hosted WSL | Aplica o digest publicado, confirma rollout/pods prontos, testa HTTP e a revisão do commit |
+| 5 · Deploy | Self-hosted WSL | Aplica o digest publicado, confirma a disponibilidade da nova revisão pelo rollout, testa HTTP e a revisão do commit |
+
+A disponibilidade da nova revisão é validada por `kubectl rollout status deployment/logistics`. Pods de revisões antigas ainda em terminação não entram em uma espera adicional de prontidão por label.
 
 A tag tem o formato `sha-<commit-completo>-<run-id>-<tentativa>`. O fluxo **não reconstrói** a imagem após o scan e **não usa `latest`** no deploy. O tar validado por SHA-256 passa entre os jobs como artefato de uma mesma execução. O Push valida seu image ID antes e depois da publicação, obtém o digest confirmado pelo Docker Hub e transmite `docker.io/namespace/logistics-landing-page@sha256:...` ao Deploy. Essa referência é aplicada diretamente ao Deployment.
 
