@@ -1,0 +1,8 @@
+*
+!package.json
+!package-lock.json
+!scripts/
+!scripts/build.mjs
+!src/
+!src/**
+!nginx.conf
