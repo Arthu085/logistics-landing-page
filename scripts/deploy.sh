@@ -33,7 +33,6 @@ kubectl --context kind-logistics cluster-info >/dev/null
 kubectl --context kind-logistics apply -f "$project_dir/k8s/namespace.yaml"
 sed "s|IMAGE_PLACEHOLDER|$image_ref|g" "$project_dir/k8s/app.yaml" | "${kube[@]}" apply -f -
 "${kube[@]}" rollout status deployment/logistics --timeout=180s
-"${kube[@]}" wait --for=condition=Ready pod -l app=logistics --timeout=120s
 actual_image=$("${kube[@]}" get deployment logistics -o jsonpath='{.spec.template.spec.containers[0].image}')
 [[ "$actual_image" == "$image_ref" ]]
 "${kube[@]}" port-forward service/logistics 18080:80 --address 127.0.0.1 >"$log_file" 2>&1 &
