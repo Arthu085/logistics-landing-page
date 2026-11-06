@@ -72,7 +72,15 @@ npm start
 
 Abra **http://localhost:3000** no navegador do Windows ou WSL. O servidor de prévia escuta somente em `127.0.0.1`. Para outra porta, use `PORT=3001 npm start`. Interrompa com `Ctrl+C`. O build gera apenas arquivos estáticos em `dist/`; essa pasta não é versionada.
 
-Os testes verificam os destinos da navegação, a existência dos arquivos, requisitos básicos de acessibilidade, o contato demonstrativo e a identificação da revisão no build. Testes do script de deploy usam comandos simulados para verificar a rejeição de imagens mutáveis, o contexto dedicado, rollout, HTTP e falhas por revisão incorreta, sem acessar um cluster real. Verifique também desktop e celular no navegador, incluindo o foco com `Tab` e os links das seções.
+Os testes verificam os destinos da navegação, a existência dos arquivos, requisitos básicos de acessibilidade, o contato demonstrativo, a identificação da revisão no build e as respostas do servidor de prévia. Testes do script de deploy usam comandos simulados para verificar a rejeição de imagens mutáveis, o contexto dedicado, rollout, HTTP e falhas por revisão incorreta, sem acessar um cluster real. Verifique também desktop e celular no navegador, incluindo o foco com `Tab` e os links das seções.
+
+Para medir a cobertura localmente, sem dependências adicionais:
+
+```bash
+npm run test:coverage
+```
+
+O comando usa a cobertura nativa do Node.js, mostra o resumo no terminal e grava o relatório LCOV em `coverage/lcov.info`. Essa pasta não é versionada.
 
 ## Docker
 
@@ -147,7 +155,7 @@ Não envie senhas ou tokens no chat nem salve credenciais no repositório. Insir
 6. Cadastre o token como secret `SONAR_TOKEN` no GitHub. Cadastre `SONAR_ORGANIZATION` e `SONAR_PROJECT_KEY` como variables.
 7. Mantenha um Quality Gate ativo no projeto. O scanner espera o resultado por até 300 segundos e reprova a etapa se o gate falhar.
 
-O Sonar analisa a página, os scripts de infraestrutura, o Dockerfile e os manifestos Kubernetes/kind. Como o frontend não possui JavaScript executável, somente `scripts/**` fica excluído da métrica de cobertura de aplicação; os scripts continuam sujeitos à análise estática. Os testes nativos validam navegação, assets, contato e build. Essa configuração não altera os critérios do Quality Gate do projeto.
+O Sonar analisa a página, os scripts de infraestrutura, o Dockerfile e os manifestos Kubernetes/kind. O frontend não possui JavaScript executável, portanto a cobertura mede o código JavaScript de `scripts/*.mjs`. O job Build gera `coverage/lcov.info` com os testes nativos e o job Sonar importa esse arquivo por meio do artefato `coverage-report-*`. Somente `scripts/deploy.sh` fica excluído da métrica, pois é Bash e a cobertura do Node.js não o mede; ele continua coberto por testes com comandos simulados e sujeito à análise estática. Essa configuração não altera os critérios do Quality Gate do projeto.
 
 A URL de conexão usa a região EU padrão (`https://sonarcloud.io`). Se sua organização estiver em outra região, ajuste `SONAR_HOST_URL` e a URL do relatório no workflow conforme o tutorial do Sonar antes de executar. O relatório fica no painel do projeto; o link aparece no resumo da etapa. O artefato `sonar-report-*` preserva `report-task.txt` quando a análise consegue gerá-lo, inclusive se o Quality Gate reprovar. Não existe relatório remoto quando a autenticação ou a configuração falha antes do envio.
 
@@ -206,8 +214,8 @@ A pipeline principal roda em push na `main` ou por execução manual da própria
 
 | Etapa | Execução | Critério de aprovação |
 | --- | --- | --- |
-| 1 · Build | GitHub-hosted | Testes, build estático e build Docker; preserva o tar e seu SHA-256 |
-| 2 · Sonar | GitHub-hosted | Análise e Quality Gate aprovados |
+| 1 · Build | GitHub-hosted | Testes com cobertura, build estático e build Docker; preserva o LCOV, o tar e seu SHA-256 |
+| 2 · Sonar | GitHub-hosted | Análise com o LCOV importado e Quality Gate aprovados |
 | 3 · Trivy | GitHub-hosted | Nenhuma vulnerabilidade HIGH/CRITICAL na imagem ou dependências, nem secret HIGH/CRITICAL no repositório |
 | 4 · Push | GitHub-hosted | Publica o mesmo tar aprovado; baixa a imagem por digest e confere seu image ID |
 | 5 · Deploy | Self-hosted WSL | Aplica o digest publicado, confirma a disponibilidade da nova revisão pelo rollout, testa HTTP e a revisão do commit |
@@ -216,7 +224,7 @@ A disponibilidade da nova revisão é validada por `kubectl rollout status deplo
 
 A tag tem o formato `sha-<commit-completo>-<run-id>-<tentativa>`. O fluxo **não reconstrói** a imagem após o scan e **não usa `latest`** no deploy. O tar validado por SHA-256 passa entre os jobs como artefato de uma mesma execução. O Push valida seu image ID antes e depois da publicação, obtém o digest confirmado pelo Docker Hub e transmite `docker.io/namespace/logistics-landing-page@sha256:...` ao Deploy. Essa referência é aplicada diretamente ao Deployment.
 
-O Trivy reprova vulnerabilidades HIGH/CRITICAL **mesmo sem correção disponível**, sem `ignore-unfixed` ou lista de exceções. Ele também analisa dependências e secrets no diretório do repositório. Os dois scans produzem JSON, e o artefato `trivy-reports-*` é enviado mesmo quando uma verificação reprova. Falhas de instalação ou rede anteriores ao scan podem não produzir JSON; os logs da etapa continuam disponíveis. Os relatórios e metadados Sonar ficam disponíveis por 14 dias; o tar da imagem, por 3 dias. Não é possível retomar o Push de uma execução cujo tar expirou: inicie uma nova execução completa.
+O Trivy reprova vulnerabilidades HIGH/CRITICAL **mesmo sem correção disponível**, sem `ignore-unfixed` ou lista de exceções. Ele também analisa dependências e secrets no diretório do repositório. Os dois scans produzem JSON, e o artefato `trivy-reports-*` é enviado mesmo quando uma verificação reprova. Falhas de instalação ou rede anteriores ao scan podem não produzir JSON; os logs da etapa continuam disponíveis. Os relatórios, a cobertura e os metadados Sonar ficam disponíveis por 14 dias; o tar da imagem, por 3 dias. Não é possível retomar o Push de uma execução cujo tar expirou: inicie uma nova execução completa.
 
 Para executar manualmente:
 

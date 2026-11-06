@@ -11,7 +11,7 @@ const files = new Map([
   ['/version.json', ['version.json', 'application/json']],
 ]);
 const port = Number(process.env.PORT ?? 3000);
-const server = createServer(async (request, response) => {
+export const server = createServer(async (request, response) => {
   if (!['GET', 'HEAD'].includes(request.method)) {
     response.writeHead(405, { Allow: 'GET, HEAD' }).end();
     return;

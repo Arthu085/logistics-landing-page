@@ -33,7 +33,13 @@ jobs:
         with:
           node-version: '24'
       - run: npm ci --ignore-scripts
-      - run: npm test
+      - run: npm run test:coverage
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: coverage-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: coverage/lcov.info
+          retention-days: 14
+          if-no-files-found: error
       - run: npm run build
         env:
           BUILD_REVISION: ${{ github.sha }}
@@ -75,6 +81,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: coverage-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: coverage
       - name: Validate Sonar configuration
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
